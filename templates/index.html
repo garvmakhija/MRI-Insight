@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MRI Insight | AI-assisted MRI analysis</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <nav><a class="brand" href="#top"><span class="brand-mark">✦</span> MRI<span>Insight</span></a><div class="nav-status"><i></i> {{ user_name }} · secure local workspace <a href="/logout">Sign out</a></div></nav>
+    <section class="hero" id="top"><div><p class="eyebrow">AI-ASSISTED MRI REVIEW</p><h1>Clearer insight from every <em>scan.</em></h1><p class="hero-copy">Choose the analysis you need, upload your MRI study, and explore your model's result in one focused workspace.</p></div><div class="hero-orbit" aria-hidden="true"><div class="orbital"><span>AI</span></div><span class="orbit-label">TWO MODELS<br>ONE WORKSPACE</span></div></section>
+    <section class="workspace" aria-label="MRI analysis workspace">
+      <aside class="control-panel"><p class="section-kicker">01 / ANALYSIS TYPE</p>
+        <div class="mode-switch" role="tablist"><button class="mode active" data-mode="classification" role="tab"><span class="mode-icon">◈</span><b>Classify scan</b><small>4 disease classes</small></button><button class="mode" data-mode="segmentation" role="tab"><span class="mode-icon">◌</span><b>Segment tumor</b><small>BraTS 4-modality</small></button></div>
+        <div class="divider"></div><p class="section-kicker">02 / UPLOAD STUDY</p>
+        <form id="analysis-form">
+          <div id="classification-upload" class="upload-set"><label class="dropzone" for="scan"><input id="scan" name="scan" type="file" accept="image/png,image/jpeg,image/webp" required><span class="upload-icon">↑</span><b>Drop an MRI image here</b><small>JPG, PNG, or WEBP · one axial scan</small></label></div>
+          <div id="segmentation-upload" class="upload-set hidden"><p class="upload-help">Upload the four aligned NIfTI modalities from one BraTS study, or upload one ZIP containing all four.</p><div class="modality-grid"><label>T1<input name="t1" type="file" accept=".nii,.nii.gz"></label><label>T1ce<input name="t1ce" type="file" accept=".nii,.nii.gz"></label><label>T2<input name="t2" type="file" accept=".nii,.nii.gz"></label><label>FLAIR<input name="flair" type="file" accept=".nii,.nii.gz"></label></div><div class="zip-divider"><span>OR</span></div><label class="zip-upload" for="study-zip"><input id="study-zip" name="study_zip" type="file" accept=".zip"><b>Upload one ZIP study</b><small>ZIP must contain T1, T1ce, T2, and FLAIR NIfTI files</small></label></div>
+          <div id="file-name" class="file-name">No file selected</div><button id="analyze" type="submit">Run analysis <span>→</span></button>
+        </form><p class="privacy">⌁ Your files and results stay local and are securely saved to this workspace database.</p>
+      </aside>
+      <section class="result-panel"><div class="result-top"><div><p class="section-kicker">03 / RESULTS</p><h2 id="result-heading">Ready when you are</h2></div><span id="result-badge" class="badge">AWAITING SCAN</span></div>
+        <div id="empty-state" class="empty-state"><div class="scan-lines"><i></i><i></i><i></i></div><h3>Your analysis will appear here</h3><p>Select a model and upload a scan to begin.</p></div>
+        <div id="loading" class="loading hidden"><div class="pulse"></div><h3>Analyzing your study</h3><p>Loading the trained model and processing the scan…</p></div>
+        <div id="results" class="hidden"></div>
+      </section>
+    </section>
+    <footer><span>RESEARCH WORKSPACE · v1.0</span><span>Not for clinical diagnosis or treatment decisions.</span></footer>
+  </main><div id="toast" role="alert"></div><script src="{{ url_for('static', filename='app.js') }}"></script>
+</body></html>

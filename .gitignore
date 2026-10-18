@@ -1,0 +1,37 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded medical scans and generated outputs
+uploads/
+instance/
+*.nii
+*.nii.gz
+*.dcm
+
+# Environment variables and secrets
+.env
+.env.*
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Temporary files
+*.log
+*.tmp
+*.h5
+
+outputs/
+mri_insight.db

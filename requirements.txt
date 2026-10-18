@@ -1,0 +1,7 @@
+Flask>=3.0,<4
+tensorflow>=2.16,<2.20
+numpy>=1.26,<3
+opencv-python>=4.9
+nibabel>=5.2
+Pillow>=10.0
+reportlab>=4.0
