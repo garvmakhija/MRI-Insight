@@ -1,5 +1,5 @@
 Flask>=3.0,<4
-tensorflow>=2.16,<2.20
+ai-edge-litert>=2.3,<3
 numpy>=1.26,<3
 opencv-python-headless>=4.9
 nibabel>=5.2

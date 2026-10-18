@@ -1,16 +1,15 @@
 """MRI Insight - secure local inference, reports, and reconstruction workspace."""
 from __future__ import annotations
-import base64, gc, io, json, os, re, sqlite3, tempfile, zipfile, zlib
+import base64, io, json, os, re, sqlite3, tempfile, zipfile, zlib
 from datetime import datetime, timezone
 from pathlib import Path
-import cv2, nibabel as nib, numpy as np, tensorflow as tf
+import cv2, nibabel as nib, numpy as np
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 from PIL import Image
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
-from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
 from werkzeug.security import check_password_hash, generate_password_hash
 
 ROOT = Path(__file__).parent
@@ -20,8 +19,7 @@ SEGMENT_CHANNELS = {"NCR": 1, "ED": 2, "ET": 3}
 REGION_ORDER = ("NCR", "ED", "ET", "TC", "WT")
 app = Flask(__name__)
 app.config.update(MAX_CONTENT_LENGTH=200 * 1024 * 1024, SECRET_KEY=os.getenv("MRI_INSIGHT_SECRET", "replace-this-local-secret"))
-loaded_model = None
-loaded_model_kind = None
+loaded_models = {}
 
 class ModelError(RuntimeError):
     """A saved model is missing, unreadable, or incompatible at inference time."""
@@ -42,24 +40,29 @@ def user_id():
     return session["user_id"]
 
 def model_for(kind):
-    global loaded_model, loaded_model_kind
     model_specs = {
-        "classification": ("brain_disease_model.keras", "The disease classification model", (None, 224, 224, 3), (None, 4)),
-        "segmentation": ("attention_unet.keras", "The segmentation model", (None, 128, 128, 4), (None, 128, 128, 4)),
+        "classification": ("brain_disease_model.tflite", "The disease classification model", (1, 224, 224, 3), (1, 4)),
+        "segmentation": ("attention_unet.tflite", "The segmentation model", (1, 128, 128, 4), (1, 128, 128, 4)),
     }
     filename, label, input_shape, output_shape = model_specs[kind]
-    if loaded_model_kind != kind:
-        if loaded_model is not None:
-            loaded_model = None
-            loaded_model_kind = None
-            tf.keras.backend.clear_session()
-            gc.collect()
-        try: loaded_model = tf.keras.models.load_model(MODELS / filename, compile=False)
+    if kind not in loaded_models:
+        try:
+            from ai_edge_litert.interpreter import Interpreter
+            interpreter = Interpreter(model_path=str(MODELS / filename), num_threads=1)
+            interpreter.allocate_tensors()
         except Exception as error: raise ModelError(f"{label} could not be loaded: {error}") from error
-        loaded_model_kind = kind
-    if loaded_model.input_shape != input_shape or loaded_model.output_shape != output_shape:
+        loaded_models[kind] = interpreter
+    model = loaded_models[kind]
+    input_details, output_details = model.get_input_details(), model.get_output_details()
+    if tuple(input_details[0]["shape"]) != input_shape or tuple(output_details[0]["shape"]) != output_shape:
         raise ModelError(f"{label} shape is incompatible with this application.")
-    return loaded_model
+    return model
+
+def predict(model, inputs):
+    input_detail, output_detail = model.get_input_details()[0], model.get_output_details()[0]
+    model.set_tensor(input_detail["index"], np.asarray(inputs, dtype=input_detail["dtype"]))
+    model.invoke()
+    return model.get_tensor(output_detail["index"])
 
 def as_data_url(array):
     buffer = io.BytesIO(); Image.fromarray(array.astype(np.uint8), "RGB").save(buffer, "PNG", optimize=True)
@@ -159,23 +162,21 @@ def best_segmentation(files, zip_upload=None):
         if any(not np.allclose(image.affine, reference.affine, atol=1e-3) for image in ordered[1:]): raise ValueError("All four modalities must belong to the same MRI study and orientation.")
         model = model_for("segmentation")
         predicted_volume = np.zeros(volumes[0].shape, dtype=np.uint8); best = (None, None, -1, None)
-        # Keep inference memory bounded while calling the same model and preprocessing for every slice.
-        # Small batches reduce peak RAM on low-memory CPU hosts such as Render Free.
-        for start in range(0, volumes[0].shape[2], 2):
-            slice_inputs = []
-            for index in range(start, min(start + 2, volumes[0].shape[2])):
-                channels = [cv2.resize(normalize(volume[:, :, index]), (128, 128)) for volume in volumes]
-                slice_inputs.append(np.stack(channels, axis=-1))
-            try: predictions = model.predict(np.asarray(slice_inputs, dtype=np.float32), verbose=0)
-            except Exception as error: raise ModelError(f"Segmentation inference failed: {error}") from error
-            for offset, prediction in enumerate(predictions):
-                index = start + offset
-                mask = np.argmax(prediction, axis=-1).astype(np.uint8)
-                restored_mask = cv2.resize(mask, (volumes[0].shape[1], volumes[0].shape[0]), interpolation=cv2.INTER_NEAREST)
-                predicted_volume[:, :, index] = restored_mask
-                # The selected source slice, restored mask, and area all share this index.
-                if (area := int(np.count_nonzero(restored_mask))) > best[2]:
-                    best = (normalize(volumes[3][:, :, index]), restored_mask, area, index)
+        # Invoke one slice at a time to keep the LiteRT activation and input memory bounded.
+        for index in range(volumes[0].shape[2]):
+            channels = [cv2.resize(normalize(volume[:, :, index]), (128, 128)) for volume in volumes]
+            slice_input = np.expand_dims(np.stack(channels, axis=-1), axis=0).astype(np.float32, copy=False)
+            try:
+                prediction = predict(model, slice_input)[0]
+            except Exception as error:
+                raise ModelError(f"Segmentation inference failed: {error}") from error
+            mask = np.argmax(prediction, axis=-1).astype(np.uint8)
+            del prediction, slice_input, channels
+            restored_mask = cv2.resize(mask, (volumes[0].shape[1], volumes[0].shape[0]), interpolation=cv2.INTER_NEAREST)
+            predicted_volume[:, :, index] = restored_mask
+            # The selected source slice, restored mask, and area all share this index.
+            if (area := int(np.count_nonzero(restored_mask))) > best[2]:
+                best = (normalize(volumes[3][:, :, index]), restored_mask, area, index)
         # NIfTI header zooms are the voxel spacing for array axes i,j,k.
         spacing = np.asarray(reference.header.get_zooms()[:3], dtype=float) * unit_to_mm
         if not np.isfinite(spacing).all() or np.any(spacing <= 0): raise ValueError("The reference NIfTI voxel spacing is invalid.")
@@ -252,8 +253,9 @@ def classify():
         with Image.open(file.stream) as uploaded: image = np.asarray(uploaded.convert("RGB"))
     except Exception: return jsonify(error="The uploaded file is not a valid readable MRI image."), 400
     try:
-        batch = preprocess_input(cv2.resize(image, (224, 224)).astype(np.float32))[None, ...]
-        try: probabilities = model_for("classification").predict(batch, verbose=0)[0]
+        try:
+            batch = cv2.resize(image, (224, 224)).astype(np.float32)[None, ...]
+            probabilities = predict(model_for("classification"), batch)[0]
         except ModelError: raise
         except Exception as error: raise ModelError(f"Disease classification inference failed: {error}") from error
     except ModelError as error: return jsonify(error=str(error)), 503
