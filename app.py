@@ -1,6 +1,6 @@
 """MRI Insight - secure local inference, reports, and reconstruction workspace."""
 from __future__ import annotations
-import base64, io, json, os, re, sqlite3, tempfile, zipfile, zlib
+import base64, gc, io, json, os, re, sqlite3, tempfile, zipfile, zlib
 from datetime import datetime, timezone
 from pathlib import Path
 import cv2, nibabel as nib, numpy as np, tensorflow as tf
@@ -20,7 +20,8 @@ SEGMENT_CHANNELS = {"NCR": 1, "ED": 2, "ET": 3}
 REGION_ORDER = ("NCR", "ED", "ET", "TC", "WT")
 app = Flask(__name__)
 app.config.update(MAX_CONTENT_LENGTH=200 * 1024 * 1024, SECRET_KEY=os.getenv("MRI_INSIGHT_SECRET", "replace-this-local-secret"))
-classification_model = segmentation_model = None
+loaded_model = None
+loaded_model_kind = None
 
 class ModelError(RuntimeError):
     """A saved model is missing, unreadable, or incompatible at inference time."""
@@ -41,18 +42,24 @@ def user_id():
     return session["user_id"]
 
 def model_for(kind):
-    global classification_model, segmentation_model
-    if kind == "classification":
-        if classification_model is None:
-            try: classification_model = tf.keras.models.load_model(MODELS / "brain_disease_model.keras", compile=False)
-            except Exception as error: raise ModelError(f"The disease classification model could not be loaded: {error}") from error
-        if classification_model.input_shape != (None, 224, 224, 3) or classification_model.output_shape != (None, 4): raise ModelError("Disease model shape is incompatible with this application (expected 224×224 RGB input and four outputs).")
-        return classification_model
-    if segmentation_model is None:
-        try: segmentation_model = tf.keras.models.load_model(MODELS / "attention_unet.keras", compile=False)
-        except Exception as error: raise ModelError(f"The segmentation model could not be loaded: {error}") from error
-    if segmentation_model.input_shape != (None, 128, 128, 4) or segmentation_model.output_shape != (None, 128, 128, 4): raise ModelError("Segmentation model shape is incompatible with this application (expected 128×128×4 input and output).")
-    return segmentation_model
+    global loaded_model, loaded_model_kind
+    model_specs = {
+        "classification": ("brain_disease_model.keras", "The disease classification model", (None, 224, 224, 3), (None, 4)),
+        "segmentation": ("attention_unet.keras", "The segmentation model", (None, 128, 128, 4), (None, 128, 128, 4)),
+    }
+    filename, label, input_shape, output_shape = model_specs[kind]
+    if loaded_model_kind != kind:
+        if loaded_model is not None:
+            loaded_model = None
+            loaded_model_kind = None
+            tf.keras.backend.clear_session()
+            gc.collect()
+        try: loaded_model = tf.keras.models.load_model(MODELS / filename, compile=False)
+        except Exception as error: raise ModelError(f"{label} could not be loaded: {error}") from error
+        loaded_model_kind = kind
+    if loaded_model.input_shape != input_shape or loaded_model.output_shape != output_shape:
+        raise ModelError(f"{label} shape is incompatible with this application.")
+    return loaded_model
 
 def as_data_url(array):
     buffer = io.BytesIO(); Image.fromarray(array.astype(np.uint8), "RGB").save(buffer, "PNG", optimize=True)
@@ -153,9 +160,10 @@ def best_segmentation(files, zip_upload=None):
         model = model_for("segmentation")
         predicted_volume = np.zeros(volumes[0].shape, dtype=np.uint8); best = (None, None, -1, None)
         # Keep inference memory bounded while calling the same model and preprocessing for every slice.
-        for start in range(0, volumes[0].shape[2], 8):
+        # Small batches reduce peak RAM on low-memory CPU hosts such as Render Free.
+        for start in range(0, volumes[0].shape[2], 2):
             slice_inputs = []
-            for index in range(start, min(start + 8, volumes[0].shape[2])):
+            for index in range(start, min(start + 2, volumes[0].shape[2])):
                 channels = [cv2.resize(normalize(volume[:, :, index]), (128, 128)) for volume in volumes]
                 slice_inputs.append(np.stack(channels, axis=-1))
             try: predictions = model.predict(np.asarray(slice_inputs, dtype=np.float32), verbose=0)
@@ -261,6 +269,9 @@ def segment():
     try: flair, mask, selected_mask_full, selected_index, spacing, points, shape, tumor_voxel_count, regions, compressed_mask = best_segmentation(files, study_zip)
     except ModelError as error: return jsonify(error=str(error)), 503
     except ValueError as error: return jsonify(error=str(error)), 400
+    except Exception:
+        app.logger.exception("Unexpected segmentation analysis failure")
+        return jsonify(error="Segmentation could not complete on this server. It may have run out of memory; try again after the service restarts."), 500
     base = np.repeat((flair * 255).astype(np.uint8)[...,None], 3, axis=-1); overlay = base.copy()
     class_colors = {1: np.array([54, 211, 153], dtype=np.uint8), 2: np.array([246, 207, 89], dtype=np.uint8), 3: np.array([242, 118, 107], dtype=np.uint8)}
     for label, color in class_colors.items():
